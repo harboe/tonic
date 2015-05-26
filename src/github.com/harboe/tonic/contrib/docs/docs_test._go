@@ -1,0 +1,82 @@
+package docs
+
+import (
+	"net/http"
+	"testing"
+
+	"github.com/harboe/tonic"
+)
+
+func TestParseTonicFunc(t *testing.T) {
+	// Testing...
+	fn := func(ctx *tonic.Context) *tonic.Response {
+		q := ctx.Query("aichata") // search query
+
+		if len(q) == 0 {
+			return ctx.NotImplemented()
+		}
+
+		// echo query string
+		return ctx.Ok(q)
+	}
+
+	doc, _ := ParseFunc(fn)
+
+	testDoc(t, doc, "fn", "Testing...")
+	testParam(t, doc.Parameters[0], "aichata", "search query", true, false)
+	testReturn(t, doc.StatusCodes[0], http.StatusNotImplemented, "Not Implemented")
+	testReturn(t, doc.StatusCodes[1], http.StatusOK, "echo query string")
+}
+
+func TestParseHasQuery(t *testing.T) {
+	fn := func(ctx *tonic.Context) *tonic.Response {
+		ctx.HasQuery("has")
+		return ctx.NoContent()
+	}
+
+	doc, _ := ParseFunc(fn)
+	testParam(t, doc.Parameters[0], "has", "", true, false)
+}
+
+func TestParseMultipleQuery(t *testing.T) {
+	fn := func(ctx *tonic.Context) *tonic.Response {
+		ctx.QueryAll("all")
+		return ctx.NoContent()
+	}
+
+	doc, _ := ParseFunc(fn)
+	testParam(t, doc.Parameters[0], "all", "", true, true)
+}
+
+func testDoc(t *testing.T, d Doc, name, desc string) {
+	if d.Name != name {
+		t.Errorf("name: expected \"%s\" got \"%s\"", name, d.Name)
+	}
+	if d.Description != desc {
+		t.Errorf("desc: expected \"%s\" got \"%s\"", desc, d.Description)
+	}
+}
+
+func testParam(t *testing.T, p Parameter, name, desc string, optional, multiple bool) {
+	if p.Name != name {
+		t.Errorf("name: expected \"%s\" got \"%s\"", name, p.Name)
+	}
+	if p.Description != desc {
+		t.Errorf("desc: expected \"%s\" got \"%s\"", desc, p.Description)
+	}
+	if p.Optional != optional {
+		t.Errorf("optional: expected \"%v\" got \"%v\"", optional, p.Optional)
+	}
+	if p.Multiple != multiple {
+		t.Errorf("multiple: expected \"%v\" got \"%v\"", multiple, p.Multiple)
+	}
+}
+
+func testReturn(t *testing.T, r Return, status int, desc string) {
+	if r.StatusCode != status {
+		t.Errorf("status: expected \"%v\" got \"%v\"", status, r.StatusCode)
+	}
+	if r.Description != desc {
+		t.Errorf("desc: expected \"%s\" got \"%s\"", desc, r.Description)
+	}
+}

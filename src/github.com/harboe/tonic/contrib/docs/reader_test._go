@@ -1,0 +1,17 @@
+package docs
+
+import (
+	"bytes"
+	"log"
+	"testing"
+)
+
+func TestReader(t *testing.T) {
+	pkg := NewPackage("../../examples/simple")
+
+	buf := bytes.NewBuffer([]byte{})
+	ToText(buf, *pkg)
+
+	log.Println(string(buf.Bytes()))
+	log.Println("testing....!")
+}

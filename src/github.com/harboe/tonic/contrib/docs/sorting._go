@@ -1,0 +1,84 @@
+package docs
+
+import (
+	"sort"
+	"strings"
+)
+
+type data struct {
+	n    int
+	swap func(i, j int)
+	less func(i, j int) bool
+}
+
+func (d *data) Len() int           { return d.n }
+func (d *data) Swap(i, j int)      { d.swap(i, j) }
+func (d *data) Less(i, j int) bool { return d.less(i, j) }
+
+// sortBy is a helper function for sorting
+func sortBy(less func(i, j int) bool, swap func(i, j int), n int) {
+	sort.Sort(&data{n, swap, less})
+}
+
+func (r *reader) sortedRoutes(routes []*route) []*Route {
+	list := make([]*Route, len(routes))
+
+	for i, route := range routes {
+		rr := &Route{
+			Path:        route.path,
+			Method:      route.http,
+			Description: route.desc,
+			Parameters:  []Parameter{},
+		}
+
+		params := map[string]Parameter{}
+
+		for _, m := range route.method {
+			fun := r.lookupFunc(m)
+
+			if len(rr.Name) == 0 && len(fun.name) > 0 {
+				rr.Name = fun.name
+			}
+			if len(rr.Description) == 0 && len(fun.desc) > 0 {
+				rr.Description = fun.desc
+			}
+
+			for key, _ := range fun.methods {
+				funky := r.lookupFunc(key)
+
+				for _, p := range funky.params {
+					if _, ok := params[p.Name]; !ok {
+						params[p.Name] = p
+					}
+				}
+			}
+
+			for _, p := range fun.params {
+				if _, ok := params[p.Name]; !ok {
+					params[p.Name] = p
+				}
+			}
+		}
+
+		for _, p := range params {
+			rr.Parameters = append(rr.Parameters, p)
+		}
+
+		sortBy(
+			func(i, j int) bool { return rr.Parameters[i].Name < rr.Parameters[j].Name },
+			func(i, j int) { rr.Parameters[i], rr.Parameters[j] = rr.Parameters[j], rr.Parameters[i] },
+			len(rr.Parameters),
+		)
+
+		rr.Description = strings.TrimSpace(rr.Description)
+		list[i] = rr
+	}
+
+	sortBy(
+		func(i, j int) bool { return list[i].Name < list[j].Name },
+		func(i, j int) { list[i], list[j] = list[j], list[i] },
+		len(list),
+	)
+
+	return list
+}

@@ -1,0 +1,463 @@
+package docs
+
+import (
+	"go/ast"
+	"go/token"
+	"log"
+	"reflect"
+	"strconv"
+	"strings"
+
+	"github.com/harboe/tonic"
+)
+
+type (
+	reader struct {
+		name string
+		desc []string
+
+		tonic     string // tonic local import name
+		filenames []string
+		imports   map[string]string
+		comments  *commentMap
+		funcs     *funcTypeList
+		vars      *namedTypeList
+		routes    []*Route
+		groups    []*Group
+
+		fset *token.FileSet
+	}
+)
+
+func (r *reader) readPackage(pkg *ast.Package) {
+	// pkg.
+	r.filenames = make([]string, len(pkg.Files))
+	r.vars = &namedTypeList{}
+	r.funcs = &funcTypeList{}
+	r.routes = []*Route{}
+
+	i := 0
+	for filename := range pkg.Files {
+		r.filenames[i] = filename
+		i++
+	}
+
+	// process files
+	for _, filename := range r.filenames {
+		log.Println("src:", filename)
+		f := pkg.Files[filename]
+		r.readFile(f)
+		log.Println("-------------")
+	}
+}
+
+func (r *reader) readFile(src *ast.File) {
+	r.imports = map[string]string{}
+
+	// init file imports
+	for _, i := range src.Imports {
+		if path, err := strconv.Unquote(i.Path.Value); err == nil {
+			if i.Name != nil {
+				r.imports[path] = i.Name.Name
+			} else if index := strings.LastIndex(path, "/"); index > 0 {
+				r.imports[path] = path[index+1:]
+			} else {
+				r.imports[path] = path
+			}
+		}
+	}
+
+	pkgPath := reflect.TypeOf(tonic.API{}).PkgPath()
+	r.tonic = r.imports[pkgPath]
+
+	r.comments = newCommentMap(src, r.fset)
+
+	for _, decl := range src.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			fun := r.funcs.lookup(d.Name.Name)
+
+			if d.Doc != nil {
+				fun.setDoc(d.Doc.Text())
+			}
+
+			r.readFunc(fun, d.Type, d.Body)
+			// case *ast.GenDecl:
+			// 	for _, s := range d.Specs {
+			// 		switch xx := s.(type) {
+			// 		case *ast.TypeSpec:
+			// 			r.readTypeSpec(xx)
+			// 		case *ast.ValueSpec:
+
+			// 			log.Println("val:", xx)
+			// 		}
+			// 	}
+		}
+
+	}
+}
+
+func (r *reader) readFunc(fun *funcType, typ *ast.FuncType, body *ast.BlockStmt) {
+	// look though all the args and add them
+	// to the namedTypes of the method.
+	if typ.Params.NumFields() > 0 {
+		for _, p := range typ.Params.List {
+			typName, local, tonic := r.baseTypeName(p.Type)
+
+			for _, n := range p.Names {
+				v := fun.vars.lookup(n.Name)
+				v.isTonic = tonic
+				v.local = local
+				v.typeName = typName
+			}
+		}
+	}
+
+	// look though the body
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			_, local, tonic := r.baseTypeName(node.Fun)
+
+			if ff, _ := fun.lookup(local); ff != nil {
+				tonic = ff.isTonic
+			}
+
+			if tonic {
+				r.readTonicFunc(fun, node)
+			}
+		case *ast.AssignStmt:
+
+			if len(node.Rhs) > 1 {
+				log.Println("lhs:", exprNameList(node.Lhs), "rhs:", exprNameList(node.Rhs))
+			} else {
+				e := node.Rhs[0]
+
+				if call, ok := e.(*ast.CallExpr); ok {
+					typ, local, tonic := r.baseTypeName(call.Fun)
+					log.Println("is:", local+"."+typ, tonic)
+					for _, lhs := range node.Lhs {
+						name, _, _ := r.baseTypeName(lhs)
+						log.Println("- lookup:", name)
+						t := fun.vars.lookup(name)
+						log.Println("- found:", t)
+
+						if t == nil {
+							continue
+						}
+
+						t.isTonic = tonic
+						t.local = local
+						t.typeName = typ
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			for _, n := range node.Names {
+				typ := fun.vars.lookup(n.Name)
+
+				if typ != nil {
+					typ.typeName, typ.local, typ.isTonic = r.baseTypeName(node.Type)
+				}
+			}
+		}
+		return true
+	})
+}
+
+func (r *reader) readTonicFunc(fun *funcType, call *ast.CallExpr) {
+	name, local, _ := r.baseTypeName(call.Fun)
+
+	// log.Println(fun.name, fun.desc)
+
+	switch {
+	// case isParam(name) || isQuery(name):
+	//
+	// 	var arg string
+	//
+	// 	if a := call.Args[0].(*ast.BasicLit); a != nil {
+	// 		arg, _ = strconv.Unquote(a.Value)
+	// 	}
+	//
+	// 	log.Println("query or param:", name, arg, r.comments.lookup(call.Pos()))
+	case isRoute(name):
+		// if
+
+		// ff := fun.funcs.lookup(name)
+		// ff.name, ff.desc := r.comments.description(call.Pos())
+
+		// log.Println(title, desc)
+		log.Println(fun.name, fun.desc)
+
+		log.Println("route:", name, local+"."+name)
+	case isGroup(name):
+		g := &Group{}
+		g.Name, g.Description = r.comments.description(call.Pos())
+
+		if a := call.Args[0].(*ast.BasicLit); a != nil {
+			g.Path, _ = strconv.Unquote(a.Value)
+		}
+
+		for i := 1; i < len(call.Args); i++ {
+			arg := call.Args[i]
+
+			if sel := arg.(ast.Expr); sel != nil {
+				name, local, _ := r.baseTypeName(sel)
+				log.Println("name:", local, ".", name)
+			}
+		}
+
+		log.Println("group:", g)
+	// case isBind(name):
+	// 	log.Println("bind:", name)
+	// case isResponse(name):
+	// 	log.Println("response:", name, r.comments.lookup(call.Pos()))
+	// case isUse(name):
+	// 	log.Println("use:", local+"."+name)
+
+	case isConstructor(name):
+		log.Println("const:", name)
+		r.name, r.desc = r.comments.description(call.Pos())
+	default:
+		log.Println("unknown:", local+"."+name)
+	}
+}
+
+// baseTypeName returns the name of the base type of x (or "")
+// and whether the type is imported or not.
+//
+func (r *reader) baseTypeName(x ast.Expr) (name, local string, tonic bool) {
+	switch t := x.(type) {
+	case *ast.Ident:
+		name = t.Name
+	case *ast.SelectorExpr:
+		if xx, ok := t.X.(*ast.Ident); ok {
+			// only possible for qualified type names;
+			// assume type is imported
+			local = xx.Name
+			name = t.Sel.Name
+			tonic = xx.Name == r.tonic
+		}
+	case *ast.StarExpr:
+		return r.baseTypeName(t.X)
+	case *ast.InterfaceType:
+		name = "interface{}"
+	}
+
+	return name, local, tonic
+}
+
+// func (r *reader) readTypeSpec(ts *ast.TypeSpec) {
+
+// 	switch t := ts.Type.(type) {
+// 	case *ast.StructType:
+// 		typ := r.lookupFunc(ts.Name.Name)
+// 		typ.isStruct = true
+
+// 		for _, f := range t.Fields.List {
+
+// 			for _, n := range f.Names {
+// 				t := typ.lookupType(n.Name)
+// 				t.typeName = exprName(f.Type)
+
+// 				if f.Tag != nil {
+// 					t.doc = f.Tag.Value
+// 				}
+// 			}
+// 		}
+// 	}
+
+// }
+
+// func (r *reader) readBody(m *method, typ *ast.FuncType, body *ast.BlockStmt) {
+// 	tonic := r.imports[pkgPath]
+
+// 	// look though all the args and add them
+// 	// to the namedTypes of the method.
+// 	if typ.Params.NumFields() > 0 {
+// 		for _, p := range typ.Params.List {
+// 			name := exprName(p.Type)
+// 			typ := m.lookupType(p.Names[0].Name)
+// 			typ.tonic = strings.Index(name, tonic) <= 1
+// 			typ.typeName = name
+// 		}
+// 	}
+
+// 	ast.Inspect(body, func(n ast.Node) bool {
+// 		switch t := n.(type) {
+// 		case *ast.AssignStmt:
+// 			for i := 0; i < len(t.Rhs); i++ {
+// 				lhs := exprName(t.Lhs[i])
+// 				rhs := exprName(t.Rhs[i])
+// 				typ := m.lookupType(lhs)
+
+// 				if typ != nil {
+// 					typ.tonic = strings.Index(rhs, tonic) <= 1
+
+// 					if len(typ.typeName) == 0 {
+// 						typ.typeName = rhs
+// 					}
+// 				}
+// 			}
+// 			return true
+// 		case *ast.CallExpr:
+// 			name := exprName(t)
+
+// 			// set the desc if the call is one of the constructors.
+// 			if name == tonic+".Default()" || name == tonic+".New()" {
+// 				r.desc = r.Comment(t.Pos())
+// 				return false
+// 			}
+
+// 			switch s := t.Fun.(type) {
+// 			case *ast.SelectorExpr:
+// 				// lookup type and determine if it's a tonic var.
+// 				if typ := m.lookupType(exprName(s.X)); !typ.tonic {
+// 					return true
+// 				}
+
+// 				r.readTonic(m, t)
+// 			case *ast.Ident:
+// 				if !m.methods[s.Name] {
+// 					m.methods[s.Name] = false
+// 				}
+// 			}
+// 		case *ast.ValueSpec:
+// 			for _, n := range t.Names {
+// 				typ := m.lookupType(n.Name)
+
+// 				if typ != nil {
+// 					typ.typeName = exprName(t.Type)
+// 					typ.tonic = strings.Index(typ.typeName, tonic) <= 1
+// 				}
+// 			}
+// 		}
+// 		return true
+// 	})
+// }
+
+// func (r *reader) readTonic(m *method, call *ast.CallExpr) {
+// 	expr := exprName(call)
+
+// 	if p, ok := parseQuery(expr); ok {
+// 		// try parsing query parameter.
+// 		p.Description = r.Comment(call.Pos())
+// 		m.params = append(m.params, p)
+// 	} else if b, ok := parseBind(expr); ok {
+// 		// try parsing binding
+// 		log.Println("bind:", b)
+// 	} else if httpMethod, ok := parseRoute(expr); ok {
+// 		// try parsing route (get, post, route....)
+// 		route := &route{
+// 			http:   strings.ToUpper(httpMethod),
+// 			method: []string{},
+// 			desc:   r.Comment(call.Pos()),
+// 		}
+
+// 		for i, e := range call.Args {
+// 			switch a := e.(type) {
+// 			case *ast.BasicLit:
+// 				if i == 0 {
+// 					route.path, _ = strconv.Unquote(a.Value)
+// 				} else {
+// 					route.http = strings.ToUpper(a.Value)
+// 				}
+// 			case *ast.Ident:
+// 				route.method = append(route.method, a.Name)
+// 			case *ast.FuncLit:
+// 				m2 := r.lookupFunc("")
+// 				route.method = append(route.method, m2.name)
+// 				r.readBody(m2, a.Type, a.Body)
+// 			}
+// 		}
+
+// 		r.routes = append(r.routes, route)
+// 	} else if status, ok := parseReturn(expr); ok {
+// 		// try parsing return stmt.
+// 		log.Println("response:", status)
+
+// 		if len(status) == 0 {
+// 			statusCode := exprName(call.Args[0])
+// 			log.Println("status:", statusCode)
+// 			// if sel := call.Args[0].(*ast.Selectos
+// 		}
+
+// 		for _, x := range call.Args {
+// 			switch a := x.(type) {
+// 			case *ast.BasicLit:
+// 				log.Println("value:", a.Value)
+// 			case *ast.Ident:
+// 				name := exprName(a)
+// 				typ := m.lookupType(name)
+// 				prefix := typ.Import()
+
+// 				// log.Println("lookup:", typ, "in", prefix)
+
+// 				if v := m.lookupType(prefix); v != nil {
+// 					prefix = v.Import()
+// 				}
+
+// 				if path := r.ImportPath(prefix); len(path) > 0 {
+// 					r.readImport(path, typ)
+// 				}
+// 			}
+// 		}
+// 	}
+// }
+
+// func (r *reader) readImport(path string, typ *namedType) {
+// 	dir := filepath.Join(os.Getenv("GOPATH"), path)
+// 	// r.filenames = append(r.filenames, dir)
+
+// 	log.Println("looking", dir, "for", typ.typeName)
+// }
+
+// func (r *reader) lookupFunc(name string) *method {
+// 	if m, ok := r.funcs[name]; ok {
+// 		return m
+// 	}
+
+// 	if len(name) == 0 {
+// 		r.funcCounter++
+// 		name = fmt.Sprintf("func%04d", r.funcCounter)
+// 	}
+
+// 	m := &method{name, "", []Parameter{}, map[string]bool{}, map[string]*namedType{}, false}
+// 	r.funcs[name] = m
+// 	return m
+// }
+
+// // returns the line number of the specific position.
+// func (r *reader) Line(p token.Pos) int {
+// 	if file := r.fset.File(p); file != nil {
+// 		return file.Line(p)
+// 	}
+
+// 	return -1
+// }
+
+// // returns the comment on the same line
+// // or the line above the specific position
+// func (r *reader) Comment(p token.Pos) string {
+// 	l := r.Line(p)
+
+// 	if d, ok := r.comments[l]; ok {
+// 		return d
+// 	}
+
+// 	if d, ok := r.comments[l-1]; ok {
+// 		return d
+// 	}
+
+// 	return ""
+// }
+
+// func (r *reader) ImportPath(name string) string {
+// 	for k, v := range r.imports {
+// 		if v == name {
+// 			return k
+// 		}
+// 	}
+
+// 	return ""
+// }
